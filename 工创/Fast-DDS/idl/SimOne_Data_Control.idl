@@ -1,0 +1,49 @@
+enum ESimOneDDS_Throttle_Mode
+{                                     
+	ESimOneDDS_Throttle_Mode_Percent,         //[0, 1]                                                            
+	ESimOneDDS_Throttle_Mode_Torque,          //engine torque, N.m                                                
+	ESimOneDDS_Throttle_Mode_Speed,           //vehicle speed, m/s,   in this mode, brake input is ignored        
+	ESimOneDDS_Throttle_Mode_Accel,           //vehicle acceleration, m/s^2, in this mode, brake input is ignored 
+	ESimOneDDS_Throttle_Mode_EngineAV,        //engine, rpm                                                       
+	ESimOneDDS_Throttle_Mode_WheelTorque     //torques applied to each wheel, array, size is the wheel number, N.m
+};
+
+enum ESimOneDDS_Brake_Mode
+{
+	ESimOneDDS_Brake_Mode_Percent,                 // [0, 1], factor of max brake pressure
+	ESimOneDDS_Brake_Mode_MasterCylinderPressure,  // MPa
+	ESimOneDDS_Brake_Mode_PedalForce,              // N
+	ESimOneDDS_Brake_Mode_WheelCylinderPressure,   // Mpa for each wheel
+	ESimOneDDS_Brake_Mode_WheelTorque              // Nm for each wheel
+};
+
+enum ESimOneDDS_Steering_Mode
+{
+	ESimOneDDS_Steering_Mode_Percent,            // [-1, 1], left turn is negative, right is positive
+	ESimOneDDS_Steering_Mode_SteeringWheelAngle, // steering wheel angle, degree
+	ESimOneDDS_Steering_Mode_Torque,             // torque to steering wheel, N.m
+	ESimOneDDS_Steering_Mode_AngularSpeed,       // steering wheel angualr speed, degree/s
+	ESimOneDDS_Steering_Mode_WheelAngle,         // degree for each wheel
+	ESimOneDDS_Steering_Mode_WheelAnglarSpeed   // degree/s for each wheel
+};
+
+enum ESimOneDDS_Gear_Mode
+{
+	ESimOneDDS_Gear_Mode_Neutral,
+	ESimOneDDS_Gear_Mode_Drive,      // forward gear for automatic gear
+	ESimOneDDS_Gear_Mode_Reverse,
+	ESimOneDDS_Gear_Mode_Parking
+};
+
+struct SimOneDDS_Data_Control : SimOneDDS_Data
+{
+	ESimOneDDS_Throttle_Mode throttleMode;
+	float throttle;
+	ESimOneDDS_Brake_Mode brakeMode;
+	float brake;
+	ESimOneDDS_Steering_Mode steeringMode;
+	float steering;
+	boolean handbrake;
+	boolean isManualGear;
+	ESimOneDDS_Gear_Mode  gear;
+};

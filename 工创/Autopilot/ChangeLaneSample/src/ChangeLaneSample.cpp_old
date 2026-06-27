@@ -1,0 +1,793 @@
+#include "SimOneServiceAPI.h"
+#include "SimOneSensorAPI.h"
+#include "SimOneHDMapAPI.h"
+#include "SSD/SimPoint3D.h"
+#include "UtilDriver.h"
+#include "UtilMath.h"
+#include "hdmap\SampleGetNearMostLane.h"
+#include "hdmap\SampleGetLaneST.h"
+#include "SimOneEvaluationAPI.h"
+#include <iostream>
+#include <memory>
+#include <cstring>
+#include <limits>
+#include <algorithm>
+//-----------------------------------------------------------------------------
+// 常量定义
+//-----------------------------------------------------------------------------
+#define STRINGS_EQUAL 0
+#define ON (1)
+#define OFF (0)
+#define MIN(a, b) (((a) < (b)) ? (a) : (b))
+#define MAX(a, b) (((a) > (b)) ? (a) : (b))
+#define MINMAX(input, low, upper) MIN(MAX(input, low), upper)
+
+// 默认油门值：车辆在正常行驶时的油门输入（单位：m/s）
+const float DEFAULT_SPEED = 16.67f; // 60码
+// 默认油门值：车辆在正常行驶时的油门输入
+const float DEFAULT_THROTTLE = 0.12f;
+// 默认刹车值：车辆在无制动需求时的刹车输入（即不踩刹车）
+const float DEFAULT_BRAKE = 0.0f;
+// 变道默认距离：用于控制变道过程中与障碍物或目标车道的距离（单位：米）
+const int LANE_CHANGE_DISTANCE = 3;
+// 紧急停车距离：当障碍物距离小于该值时，触发紧急制动逻辑（单位：米）
+const double EMERGENCY_STOP_DISTANCE = 15.0;
+// 变道触发距离：当障碍物距离小于该值时，触发变道行为（单位：米）
+const double LANE_CHANGE_TRIGGER_DISTANCE = 20.0;
+// 速度阈值：用于判断是否减速或加速的临界速度（单位：km/h）
+const double SPEED_THRESHOLD_KMH = 15.0;
+// 最近距离阈值：当障碍物距离小于该值时，触发最大刹车（单位：米）
+const double CLOSEST_OBSTACLE_DISTANCE = 11.5;
+// TTC（Time To Collision）阈值：当碰撞时间小于该值时，触发自动紧急制动（AEB）（单位：秒）
+const double TTC_THRESHOLD = 3.4;
+// 左侧车道探测距离：用于检测左侧是否有车辆的最大探测距离（单位：米）
+const double LEFT_LANE_DETECTION_DISTANCE = 35.0;
+// 近距离障碍物制动距离：当障碍物距离小于该值且速度较低时，触发完全制动（单位：米）
+const double CLOSE_OBSTACLE_BRAKE_DISTANCE = 15.0;
+// 默认安全距离：用于判断是否需要执行TTC的距离逻辑（单位：米）
+const double DEFAULT_SAFETY_DISTANCE = 15.0;
+// 速度保持状态的阈值
+const double SPEED_HYSTERESIS = 0.5f;
+constexpr double MIN_LOOK_AHEAD = 5.0;  // 最低前视距离（米）
+constexpr double MAX_LOOK_AHEAD = 15.0; // 最高前视距离（米）
+constexpr double LOOK_AHEAD_GAIN = 0.1; // 每 km/h 增加的前视距离（米）
+
+uint8_t left_lane = OFF;                   // 左侧车道是否存在
+uint8_t right_lane = OFF;                  // 右侧车道是否存在
+uint8_t change_road = OFF;                 // 是否变道
+uint8_t use_fixd_steering = OFF;           // 是否使用固定转向
+uint16_t dis_CR = LANE_CHANGE_DISTANCE;    // 变道默认距离
+float defalut_brake = DEFAULT_BRAKE;       // 默认刹车值
+float defalut_throttle = DEFAULT_THROTTLE; // 默认油门值
+SSD::SimString mainVehicleLaneId;          // 主车所在车道ID
+SSD::SimString mainVehicleLaneId_last;     // 上一帧主车所在车道ID
+SSD::SimPoint3DVector inputPoints;         // 输入路径点
+SSD::SimPoint3DVector targetPath;          // 目标路径
+SSD::SimPoint3D targetPointPos;            // 目标位置
+
+//-----------------------------------------------------------------------------
+// 辅助函数声明
+//-----------------------------------------------------------------------------
+struct TrajectoryPoint
+{
+    double x;
+    double y;
+    double v;
+};
+
+void lane_reset(void);                                                                                                                                                     // 车道重置函数
+void change_road_function(SSD::SimPoint3DVector *inps, SSD::SimPoint3D &start_p, SSD::SimPoint3D &end_p);                                                                  // 变道函数
+bool IsCarInLeftLane(SSD::SimPoint3D MainCarPos, SSD::SimString MainCarLandId, SimOne_Data_Obstacle *obstacle, HDMapStandalone::MLaneLink laneLink, double &LefrCarSpeed); // 检查左侧是否有车辆
+void ConvertToTrajectoryPoints(
+    const SSD::SimPoint3DVector &traj_data,
+    double default_speed,
+    std::vector<TrajectoryPoint> &output);
+bool DetectObstacleInSameLane(const SimOne_Data_Obstacle &obstacleData, const SSD::SimPoint3D &mainCarPos, SSD::SimString mainVehicleLaneId,
+                              double &minDistance, int &potentialObstacleIndex, SSD::SimString &potentialObstacleLaneId); // 检测同车道障碍物
+
+void HandleLaneChange(SSD::SimPoint3D mainVehiclePos, SSD::SimPoint3D targetPointPos, uint8_t left_lane, uint8_t right_lane,
+                      uint8_t &change_road, uint8_t &use_fixd_steering, float &steering, SSD::SimPoint3DVector &inputPoints, SSD::SimPoint3DVector &targetPath); // 处理车道变更
+
+void UpdateControlForLaneChange(uint8_t change_road, uint8_t left_lane, uint8_t right_lane, float dis_CR, float minDistance,
+                                SimOne_Data_Control *control, SimOne_Data_Signal_Lights *light); // 更新变道控制
+// double angleToFocusPath(const SSD::SimPoint3DVector &traj_data, const SimOne_Data_Gps *pGps, size_t &currentIndex, double lookAheadDistance);
+// double smoothSteering(double currentSteering, double previousSteering, double speed, double minAlpha, double maxAlpha);
+// double calculateThrottle(double currentSpeed, double targetSpeed);
+void processControl(SimOne_Data_Gps *pGps, SSD::SimPoint3DVector &traj_data, SimOne_Data_Control *control);
+
+//-----------------------------------------------------------------------------
+// 主函数
+//-----------------------------------------------------------------------------
+int main()
+{
+    // 初始化核心变量
+    const char *MAIN_VEHICLE_ID = "0";
+    bool isSimOneInitialized = false;
+    bool isJoinTimeLoop = true;
+    uint64_t fps_count = 0;
+    bool AEBState = false;
+
+    // 初始化SimOne API
+    SimOneAPI::InitSimOneAPI(MAIN_VEHICLE_ID, isJoinTimeLoop);
+    SimOneAPI::SetDriverName(MAIN_VEHICLE_ID, "OTTOPILOT");
+    SimOneAPI::InitEvaluationServiceWithLocalData(MAIN_VEHICLE_ID); // 函数评价初始化
+
+    // 预分配数据对象
+    auto gps = std::make_unique<SimOne_Data_Gps>();
+    auto obstacle = std::make_unique<SimOne_Data_Obstacle>();
+
+    // 地图加载循环
+    int timeout = 20;
+    while (true)
+    {
+        if (SimOneAPI::LoadHDMap(timeout))
+        {
+            SimOneAPI::SetLogOut(ESimOne_LogLevel_Type::ESimOne_LogLevel_Type_Information, "HDMap Information Loaded");
+            break;
+        }
+        SimOneAPI::SetLogOut(ESimOne_LogLevel_Type::ESimOne_LogLevel_Type_Information, "HDMap Information Loading...");
+    }
+
+    // 获取路径点
+    std::unique_ptr<SimOne_Data_WayPoints> pWayPoints = std::make_unique<SimOne_Data_WayPoints>();
+    if (SimOneAPI::GetWayPoints(MAIN_VEHICLE_ID, pWayPoints.get()))
+    {
+        for (size_t i = 0; i < pWayPoints->wayPointsSize; ++i)
+        {
+            SSD::SimPoint3D inputWayPoints(double(pWayPoints->wayPoints[i].posX), double(pWayPoints->wayPoints[i].posY), 0.0);
+            inputPoints.push_back(inputWayPoints);
+        }
+        targetPointPos = inputPoints.back();
+    }
+    else
+    {
+        SimOneAPI::SetLogOut(ESimOne_LogLevel_Type::ESimOne_LogLevel_Type_Error, "Get mainVehicle wayPoints failed");
+        return -1;
+    }
+
+    // 生成路线
+    if (pWayPoints->wayPointsSize >= 2)
+    {
+        SSD::SimVector<int> indexOfValidPoints;
+        if (!SimOneAPI::GenerateRoute(inputPoints, indexOfValidPoints, targetPath))
+        {
+            SimOneAPI::SetLogOut(ESimOne_LogLevel_Type::ESimOne_LogLevel_Type_Error, "Generate mainVehicle route failed");
+            return -1;
+        }
+        std::cout << "=== 11111111111Input Points ===" << std::endl;
+        for (size_t i = 0; i < inputPoints.size(); ++i)
+        {
+            const SimPoint3D &pt = inputPoints[i];
+            std::cout << "Point[" << i << "] = (" << pt.x << ", " << pt.y << ", " << pt.z << ")" << std::endl;
+        }
+        std::cout << "\n=== indexOfValidPoints ===" << std::endl;
+        for (size_t i = 0; i < indexOfValidPoints.size(); ++i)
+        {
+            std::cout << "Index[" << i << "] = " << indexOfValidPoints[i] << std::endl;
+        }
+        std::cout << "\n=== 1111111111111targetPath ===" << std::endl;
+        for (size_t i = 0; i < targetPath.size(); ++i)
+        {
+            const SimPoint3D &pt = targetPath[i];
+            std::cout << "Point[" << i << "] = (" << pt.x << ", " << pt.y << ", " << pt.z << ")" << std::endl;
+        }
+    }
+    else if (pWayPoints->wayPointsSize == 1)
+    {
+        SSD::SimString laneIdInit = SampleGetNearMostLane(inputPoints[0]);
+        HDMapStandalone::MLaneInfo laneInfoInit;
+        if (!SimOneAPI::GetLaneSample(laneIdInit, laneInfoInit))
+        {
+            SimOneAPI::SetLogOut(ESimOne_LogLevel_Type::ESimOne_LogLevel_Type_Error, "Generate mainVehicle initial route failed");
+            return -1;
+        }
+        else
+        {
+            targetPath = laneInfoInit.centerLine;
+        }
+    }
+    else
+    {
+        SimOneAPI::SetLogOut(ESimOne_LogLevel_Type::ESimOne_LogLevel_Type_Error, "Number of wayPoints is zero");
+        return -1;
+    }
+
+    // 主循环
+    while (true)
+    {
+        fps_count++;
+        lane_reset();
+        int frame = SimOneAPI::Wait();
+        ESimOne_Case_Status runStatus = SimOneAPI::GetCaseRunStatus();
+        // 根据驻车停止状态进入评价函数
+        if (runStatus == ESimOne_Case_Status_Stop)
+        {
+            SimOneAPI::SaveEvaluationRecord();
+            break;
+        }
+        // 获取车辆状态数据
+        if (!SimOneAPI::GetGps(MAIN_VEHICLE_ID, gps.get()))
+        {
+            SimOneAPI::SetLogOut(ESimOne_LogLevel_Type::ESimOne_LogLevel_Type_Warning, "Fetch GPS failed");
+        }
+
+        if (!SimOneAPI::GetGroundTruth(MAIN_VEHICLE_ID, obstacle.get()))
+        {
+            SimOneAPI::SetLogOut(ESimOne_LogLevel_Type::ESimOne_LogLevel_Type_Warning, "Fetch obstacle failed");
+        }
+
+        // 案例运行时处理逻辑
+        if (runStatus == ESimOne_Case_Status::ESimOne_Case_Status_Running)
+        {
+            if (!isSimOneInitialized)
+            {
+                SimOneAPI::SetLogOut(ESimOne_LogLevel_Type::ESimOne_LogLevel_Type_Information, "SimOne Initialized!");
+                isSimOneInitialized = true;
+            }
+            // 获取主车状态
+            SSD::SimPoint3D mainVehiclePos(gps->posX, gps->posY, gps->posZ);
+            double mainVehicleSpeed = UtilMath::calculateSpeed(gps->velX, gps->velY, gps->velZ);
+
+            double minDistance = std::numeric_limits<double>::max();
+            int potentialObstacleIndex = obstacle->obstacleSize;
+            mainVehicleLaneId_last = mainVehicleLaneId;
+            mainVehicleLaneId = SampleGetNearMostLane(mainVehiclePos);
+            if (fps_count == 1)
+            {
+                mainVehicleLaneId_last = mainVehicleLaneId;
+            }
+
+            SSD::SimString potentialObstacleLaneId = "";
+            if (!DetectObstacleInSameLane(*obstacle, mainVehiclePos, mainVehicleLaneId, minDistance, potentialObstacleIndex, potentialObstacleLaneId))
+            {
+                // No obstacle found in same lane
+            }
+
+            auto &potentialObstacle = obstacle->obstacle[potentialObstacleIndex];
+            double obstacleSpeed = UtilMath::calculateSpeed(potentialObstacle.velX, potentialObstacle.velY, potentialObstacle.velZ);
+            SSD::SimPoint3D potentialObstaclePos(potentialObstacle.posX, potentialObstacle.posY, potentialObstacle.posZ);
+            double sObstalce = 0.;
+            double tObstacle = 0.;
+
+            double sMainVehicle = 0.;
+            double tMainVehicle = 0.;
+
+            bool isObstalceBehind = false;
+            if (!potentialObstacleLaneId.Empty())
+            {
+
+                SampleGetLaneST(potentialObstacleLaneId, potentialObstaclePos, sObstalce, tObstacle);
+                SampleGetLaneST(mainVehicleLaneId, mainVehiclePos, sMainVehicle, tMainVehicle);
+
+                isObstalceBehind = !(sMainVehicle >= sObstalce);
+            }
+            // 拿到控制和车灯
+            auto control = std::make_unique<SimOne_Data_Control>();
+            auto light = std::make_unique<SimOne_Data_Signal_Lights>();
+
+            control->throttle = DEFAULT_THROTTLE;
+            control->brake = defalut_brake;
+            control->steering = 0.f;
+            control->handbrake = false;
+            control->isManualGear = false;
+            control->gear = static_cast<ESimOne_Gear_Mode>(1);
+            light->signalLights = ESimOne_Signal_Light::ESimOne_Signal_Light_None;
+
+            HDMapStandalone::MLaneLink laneLink;
+            SimOneAPI::GetLaneLink(mainVehicleLaneId, laneLink);
+            // 判断左右方有无车道
+            if (strlen(laneLink.leftNeighborLaneName.GetString()) != 0)
+            {
+                left_lane = ON;
+            }
+            if (strlen(laneLink.rightNeighborLaneName.GetString()) != 0)
+            {
+                right_lane = ON;
+            }
+
+            if (isObstalceBehind && change_road == OFF) // 如果后方有障碍物
+            {
+                if ((left_lane == ON || right_lane == ON) && minDistance <= 40 && std::abs(obstacleSpeed) <= 2 && fps_count >= 5) // 如果有左右车道且障碍物距离小于40
+                {
+                    if (minDistance <= EMERGENCY_STOP_DISTANCE && fps_count <= 400) // 如果障碍物距离小于紧急停车距离20
+                    {
+                        if (fps_count <= 150)
+                        {
+                            control->gear = static_cast<ESimOne_Gear_Mode>(2);
+                            control->brake = 1.0f;
+                            SimOneAPI::SetDrive(MAIN_VEHICLE_ID, control.get());
+                            std::cout << "waiting\n"
+                                      << std::endl;
+                        }
+                        else
+                        {
+                            control->gear = static_cast<ESimOne_Gear_Mode>(2);
+                            SimOneAPI::SetDrive(MAIN_VEHICLE_ID, control.get());
+                            std::cout << "back back\n"
+                                      << std::endl;
+                        }
+                        goto END;
+                    }
+                    if (minDistance <= LANE_CHANGE_TRIGGER_DISTANCE) // 如果障碍物距离小于变道触发距离22
+                    {
+                        change_road = ON;
+                        use_fixd_steering = ON;
+                    }
+                    else
+                    {
+                        //     change_road_function(&inputPoints, mainVehiclePos, targetPointPos);
+                        //     SSD::SimVector<int> tempindexOfValidPoints;
+                        //     if (!SimOneAPI::GenerateRoute(inputPoints, tempindexOfValidPoints, targetPath))
+                        //     {
+                        //         SimOneAPI::SetLogOut(ESimOne_LogLevel_Type::ESimOne_LogLevel_Type_Error, "Generate mainVehicle route failed when finish change road");
+                        //         return -1;
+                        //     }
+                        // // processControl(gps.get(),targetPath,control.get());
+                    }
+                }
+                else // 否则当没有左右车道或障碍物距离大于40
+                {
+                    if (obstacle->obstacleSize == 3)
+                    {
+                        if (minDistance <= CLOSEST_OBSTACLE_DISTANCE) // 小于最近距离阈值11.5就踩死
+                        {
+                            control->throttle = 0.f;
+                            control->brake = 1.0f;
+                        }
+                    }
+                    else
+                    {
+                        if (minDistance > CLOSEST_OBSTACLE_DISTANCE && minDistance <= 40) // 计算ttc（无加速度）
+                        {
+                            double defaultDistance = DEFAULT_SAFETY_DISTANCE;
+                            double timeToCollision = std::abs((minDistance - defaultDistance)) / (obstacleSpeed - mainVehicleSpeed);
+                            double defautlTimeToCollision = TTC_THRESHOLD; // 当碰撞时间小于该值3.4时，触发自动紧急制动
+                            if (-timeToCollision < defautlTimeToCollision && timeToCollision < 0)
+                            {
+                                AEBState = true;
+                                control->brake = (float)(mainVehicleSpeed * 3.6 * 0.65 + 0.20);
+                            }
+
+                            if (AEBState)
+                            {
+                                control->throttle = 0.1f;
+                            }
+                            if (minDistance <= 25 && std::abs(obstacleSpeed) <= 1.0 && potentialObstacle.type == ESimOne_Obstacle_Type::ESimOne_Obstacle_Type_Car)
+                            {
+                                control->throttle = 0.f;
+                                control->brake = 1.0f;
+                            }
+                        }
+                        else if (minDistance > 40 && potentialObstacle.type == ESimOne_Obstacle_Type::ESimOne_Obstacle_Type_Car)
+                        {
+                            control->throttle = 0.2f;
+                        }
+                    }
+                }
+            }
+            else if (change_road == ON) // 可以变道
+            {
+                std::cout << "------------------------------------change_road--------------------\n"
+                          << std::endl;
+                control->throttle = 0.0f;
+                if (left_lane == ON)
+                {
+                    control->steering = MINMAX(-dis_CR / (float)minDistance, -0.3f, 0.3f);
+                    light->signalLights = ESimOne_Signal_Light::ESimOne_Signal_Light_LeftBlinker;
+                    std::cout << "------------------------------------left--------------------\n"
+                              << std::endl;
+                }
+                else if (right_lane == ON)
+                {
+                    control->steering = MINMAX(dis_CR / (float)minDistance, -0.3f, 0.3f);
+                    light->signalLights = ESimOne_Signal_Light::ESimOne_Signal_Light_RightBlinker;
+                    std::cout << "------------------------------------right--------------------\n"
+                              << std::endl;
+                }
+
+                if (strcmp(mainVehicleLaneId.GetString(), mainVehicleLaneId_last.GetString()) != STRINGS_EQUAL) // 是否换车道了
+                {
+                    change_road = OFF;
+                    use_fixd_steering = OFF;
+                    targetPath.clear();
+                    change_road_function(&inputPoints, mainVehiclePos, targetPointPos); // 换道
+                    SSD::SimVector<int> tempindexOfValidPoints;
+                    if (!SimOneAPI::GenerateRoute(inputPoints, tempindexOfValidPoints, targetPath))
+                    {
+                        SimOneAPI::SetLogOut(ESimOne_LogLevel_Type::ESimOne_LogLevel_Type_Error, "Generate mainVehicle route failed when finish change road");
+                        return -1;
+                    }
+                    SimOneAPI::SetLogOut(ESimOne_LogLevel_Type::ESimOne_LogLevel_Type_Error,
+                                         "\nmainVehiclePos = (%f, %f, %f), targetPointPos = (%f, %f, %f)\n",
+                                         mainVehiclePos.x, mainVehiclePos.y, mainVehiclePos.z,
+                                         targetPointPos.x, targetPointPos.y, targetPointPos.z);
+                    std::cout << "=== Input Points ===" << std::endl;
+                    for (size_t i = 0; i < inputPoints.size(); ++i)
+                    {
+                        const SimPoint3D &pt = inputPoints[i];
+                        std::cout << "Point[" << i << "] = (" << pt.x << ", " << pt.y << ", " << pt.z << ")" << std::endl;
+                    }
+
+                    std::cout << "\n=== Valid Point Indices ===" << std::endl;
+                    for (size_t i = 0; i < tempindexOfValidPoints.size(); ++i)
+                    {
+                        std::cout << "Index[" << i << "] = " << tempindexOfValidPoints[i] << std::endl;
+                    }
+                    std::cout << "\n=== targetPath ===" << std::endl;
+                    for (size_t i = 0; i < targetPath.size(); ++i)
+                    {
+                        const SimPoint3D &pt = targetPath[i];
+                        std::cout << "Point[" << i << "] = (" << pt.x << ", " << pt.y << ", " << pt.z << ")" << std::endl;
+                    }
+                }
+            }
+
+            double LefrCarSpeed = 0.0;
+            if (IsCarInLeftLane(mainVehiclePos, mainVehicleLaneId, obstacle.get(), laneLink, LefrCarSpeed))
+            {
+                if ((mainVehicleSpeed) > LefrCarSpeed / 2.0 && (LefrCarSpeed) > 1.0)
+                {
+                    control->throttle = 0.0f;
+                    control->brake = 0.3f;
+                }
+                else
+                {
+                    control->throttle = 0.1f;
+                    control->brake = 0.1f;
+                }
+            }
+
+            if (use_fixd_steering == OFF)
+            {
+                double steering = UtilDriver::calculateSteering(targetPath, gps.get());
+                control->steering = (float)steering * 1.3f;
+                if (strcmp(mainVehicleLaneId.GetString(), mainVehicleLaneId_last.GetString()) != STRINGS_EQUAL)
+                {
+                    // 判断是左变道还是右变道
+                    HDMapStandalone::MLaneLink laneLink;
+                    SimOneAPI::GetLaneLink(mainVehicleLaneId_last, laneLink);
+
+                    if (mainVehicleLaneId == laneLink.leftNeighborLaneName)
+                    {
+                        light->signalLights = ESimOne_Signal_Light::ESimOne_Signal_Light_LeftBlinker;
+                    }
+                    else if (mainVehicleLaneId == laneLink.rightNeighborLaneName)
+                    {
+                        light->signalLights = ESimOne_Signal_Light::ESimOne_Signal_Light_RightBlinker;
+                    }
+                }
+            }
+
+            SimOneAPI::SetSignalLights(MAIN_VEHICLE_ID, light.get());
+            SimOneAPI::SetDrive(MAIN_VEHICLE_ID, control.get());
+        }
+        else
+        {
+            SimOneAPI::SetLogOut(ESimOne_LogLevel_Type::ESimOne_LogLevel_Type_Information, "SimOne Initializing...");
+        }
+    END:
+        SimOneAPI::NextFrame(frame);
+    }
+    return 0;
+}
+
+void lane_reset(void)
+{
+    left_lane = OFF;
+    right_lane = OFF;
+}
+
+void change_road_function(SSD::SimPoint3DVector *inps, SSD::SimPoint3D &start_p, SSD::SimPoint3D &end_p)
+{
+    inps->clear();
+    inps->push_back(start_p);
+    inps->push_back(end_p);
+}
+
+bool IsCarInLeftLane(SSD::SimPoint3D MainCarPos, SSD::SimString MainCarLandId, SimOne_Data_Obstacle *obstacle, HDMapStandalone::MLaneLink laneLink, double &LefrCarSpeed)
+{
+    bool res = false;
+    SSD::SimPoint3D CarPos;
+    double MinDistance = std::numeric_limits<double>::max();
+    SSD::SimString CarLaneId = "";
+    double s, t, s_toCenterLine, t_toCenterLine;
+    for (size_t i = 0; i < obstacle->obstacleSize; ++i)
+    {
+        if (obstacle->obstacle[i].type == ESimOne_Obstacle_Type::ESimOne_Obstacle_Type_Car)
+        {
+
+            CarPos = {obstacle->obstacle[i].posX, obstacle->obstacle[i].posY, obstacle->obstacle[i].posZ};
+            SimOneAPI::GetNearMostLane(CarPos, CarLaneId, s, t, s_toCenterLine, t_toCenterLine);
+            double Distance = UtilMath::planarDistance(MainCarPos, CarPos);
+
+            if (strcmp(CarLaneId.GetString(), laneLink.leftNeighborLaneName.GetString()) == 0 && Distance <= LEFT_LANE_DETECTION_DISTANCE)
+            {
+                if (Distance < MinDistance)
+                {
+                    MinDistance = Distance;
+                    LefrCarSpeed = UtilMath::calculateSpeed(obstacle->obstacle[i].velX, obstacle->obstacle[i].velY, obstacle->obstacle[i].velZ);
+                    res = true;
+                }
+            }
+        }
+    }
+    return res;
+}
+
+bool DetectObstacleInSameLane(const SimOne_Data_Obstacle &obstacleData, const SSD::SimPoint3D &mainCarPos, SSD::SimString mainVehicleLaneId,
+                              double &minDistance, int &potentialObstacleIndex, SSD::SimString &potentialObstacleLaneId)
+{
+    for (size_t i = 0; i < obstacleData.obstacleSize; ++i)
+    {
+        SSD::SimPoint3D obstaclePos(obstacleData.obstacle[i].posX, obstacleData.obstacle[i].posY, obstacleData.obstacle[i].posZ);
+        SSD::SimString obstacleLaneId = SampleGetNearMostLane(obstaclePos);
+        if (mainVehicleLaneId == obstacleLaneId)
+        {
+            double obstacleDistance = UtilMath::planarDistance(mainCarPos, obstaclePos);
+
+            if (obstacleDistance < minDistance)
+            {
+                minDistance = obstacleDistance;
+                potentialObstacleIndex = (int)i;
+                potentialObstacleLaneId = obstacleLaneId;
+            }
+        }
+    }
+    return potentialObstacleIndex < obstacleData.obstacleSize;
+}
+void ConvertToTrajectoryPoints(
+    const SSD::SimPoint3DVector &traj_data,
+    double default_speed,
+    std::vector<TrajectoryPoint> &output)
+{
+    default_speed = DEFAULT_SPEED; // 默认速度，例如 -1.0 表示未知或无效
+    output.clear();
+    output.reserve(traj_data.size());
+
+    for (size_t i = 0; i < traj_data.size(); ++i)
+    {
+        TrajectoryPoint point;
+        point.x = traj_data[i].x;
+        point.y = traj_data[i].y;
+        point.v = default_speed;
+
+        output.push_back(point);
+    }
+};
+void HandleLaneChange(SSD::SimPoint3D mainVehiclePos, SSD::SimPoint3D targetPointPos, uint8_t left_lane, uint8_t right_lane,
+                      uint8_t &change_road, uint8_t &use_fixd_steering, float &steering, SSD::SimPoint3DVector &inputPoints, SSD::SimPoint3DVector &targetPath)
+{
+    if (change_road == ON)
+    {
+        if (left_lane == ON)
+        {
+            steering = MINMAX(-dis_CR / (float)targetPath.size(), -0.3f, 0.3f);
+        }
+        else if (right_lane == ON)
+        {
+            steering = MINMAX(dis_CR / (float)targetPath.size(), -0.3f, 0.3f);
+        }
+    }
+}
+
+// double angleToFocusPath(const SSD::SimPoint3DVector &traj_data, const SimOne_Data_Gps *pGps, size_t &currentIndex, double lookAheadDistance = 5.0f)
+// {
+//     double minDist = std::numeric_limits<double>::max();
+//     size_t closestIndex = currentIndex;
+
+//     // 定义允许的查找范围：前最多 100 个点，后最多 150 个点
+//     size_t startSearchIndex = (currentIndex >= 100) ? currentIndex - 100 : 0;
+//     size_t endSearchIndex = std::min(currentIndex + 150, traj_data.size() - 1);
+
+//     // 在限定范围内找到最接近的轨迹点
+//     for (size_t i = startSearchIndex; i <= endSearchIndex; ++i)
+//     {
+//         double dist = std::hypot(pGps->posX - traj_data[i].x, pGps->posY - traj_data[i].y);
+//         if (dist < minDist)
+//         {
+//             minDist = dist;
+//             closestIndex = i;
+//         }
+//     }
+
+//     // 更新 currentIndex 为找到的最近点，确保按顺序执行
+//     currentIndex = closestIndex;
+
+//     // 根据前视距离找到目标点
+//     size_t targetIndex = closestIndex;
+//     minDist = 0.0; // 重置距离计算用于前视目标点
+//     while (targetIndex < endSearchIndex && minDist < lookAheadDistance)
+//     {
+//         targetIndex++;
+//         minDist = std::hypot(pGps->posX - traj_data[targetIndex].x, pGps->posY - traj_data[targetIndex].y);
+//     }
+
+//     // 计算方向盘角度使用“纯跟踪”方法
+//     double dx = traj_data[targetIndex].x - pGps->posX;
+//     double dy = traj_data[targetIndex].y - pGps->posY;
+
+//     // 计算目标角度并归一化
+//     double targetHeading = std::atan2(dy, dx);
+//     if (targetHeading > M_PI)
+//         targetHeading -= 2.0 * M_PI;
+//     if (targetHeading < -M_PI)
+//         targetHeading += 2.0 * M_PI;
+
+//     // 获取当前车辆的方向角并归一化
+//     double currentHeading = pGps->oriZ;
+//     if (currentHeading > M_PI)
+//         currentHeading -= 2.0 * M_PI;
+//     if (currentHeading < -M_PI)
+//         currentHeading += 2.0 * M_PI;
+
+//     // 计算角度误差
+//     double alfa = targetHeading - currentHeading;
+//     if (alfa > M_PI)
+//         alfa -= 2.0 * M_PI;
+//     if (alfa < -M_PI)
+//         alfa += 2.0 * M_PI;
+
+//     // 计算前视点到车辆的距离
+//     double ld = std::hypot(dx, dy);
+
+//     // 使用“纯跟踪”算法计算方向盘角度
+//     double L = 1.3 + 1.55;                                                                  // 轴距和前视距离的加权值，可以根据实际情况调整
+//     double steeringAngle = -std::atan2(2.0 * L * std::sin(alfa), ld) * 36.0 / (7.0 * M_PI); // 转换为SimOne的方向盘控制角度
+
+//     std::cout << "Reference Point: ("
+//               << "X: " << traj_data[closestIndex].x << ", "
+//               << "Y: " << traj_data[closestIndex].y << ", "
+//               << "PPPX: " << pGps->posX << ", "
+//               << "PPPY: " << pGps->posY << ", "
+//               << "dx: " << dx << ", "
+//               << "dy: " << dy << ", "
+//               << "targetHeading: " << targetHeading << ", "
+//               << "steeringAngle: " << steeringAngle << ", "
+//               << "currentHeading: " << currentHeading << ")\n"
+//               << "Current Steering Angle: " << steeringAngle << " degrees\n";
+
+//     return steeringAngle;
+// }
+// double smoothSteering(double currentSteering, double previousSteering, double speed, double minAlpha = 0.01f, double maxAlpha = 0.1f)
+// {
+//     // 根据速度动态调整alpha，速度越快滤波越强
+//     double alpha = std::max(minAlpha, maxAlpha - speed * 0.01f); // 简单控制alpha变化，速度增大时alpha减小
+//     return previousSteering * (1.0f - alpha) + currentSteering * alpha;
+// }
+// // 根据目标速度和当前速度平滑控制油门
+// void keepThrottle(double currentSpeed, double targetSpeed,SimOne_Data_Control *control)
+// {
+//     if(targetSpeed = -1.0){
+//         targetSpeed = DEFAULT_SPEED;
+//     }
+//     double speedDifference = targetSpeed - currentSpeed;
+
+//     // 如果在允许的误差范围内，不加速也不刹车
+//     if (speedDifference < SPEED_HYSTERESIS)
+//     {
+//         control->throttle = 0.0;
+//         control->brake = 0.0;
+//     }
+
+//     // 如果当前速度小于目标速度，则加油
+//     if (speedDifference > 0)
+//     {
+//         // 根据速度差比例调整油门大小，最大为 1.0
+//         double throttle = std::min(1.0, speedDifference * 0.2); // 系数可调
+//         control->throttle = throttle;
+//         control->brake = 0.0;
+//     }
+//     else // 当前速度大于目标速度，需要刹车
+//     {
+//         control->throttle = 0.0;
+//         control->brake = 0.8; // 固定刹车力度，也可以根据差值动态调整
+//     }
+// }
+void processControl(SimOne_Data_Gps *pGps, const std::vector<TrajectoryPoint> &traj_data, SimOne_Data_Control *control)
+{
+    // 静态变量维护状态
+    static size_t currentIndex = 0;       // 当前匹配的轨迹点索引
+    static double previousSteering = 0.0; // 上一时刻方向盘角度
+    double currentSpeed = std::sqrt(pGps->velX * pGps->velX + pGps->velY * pGps->velY + pGps->velZ * pGps->velZ);
+    // 动态前视距离计算
+    double speedKph = currentSpeed * 3.6; // 假设 pGps->speed 单位为 m/s，转换为 km/h
+    double minLookAhead = MIN_LOOK_AHEAD;
+    double maxLookAhead = MAX_LOOK_AHEAD;
+    double lookAheadGain = LOOK_AHEAD_GAIN;
+    double lookAheadDistance = minLookAhead + speedKph * lookAheadGain;
+    lookAheadDistance = MINMAX(lookAheadDistance, minLookAhead, maxLookAhead);
+
+    // Step 1: 轨迹匹配与方向盘角度计算
+    double minDist = std::numeric_limits<double>::max();
+    size_t closestIndex = currentIndex;
+
+    // 定义搜索范围（前100/后150个点）
+    size_t startSearchIndex = (currentIndex >= 100) ? currentIndex - 100 : 0;
+    size_t endSearchIndex = std::min(currentIndex + 150, traj_data.size() - 1);
+
+    // 查找最近轨迹点
+    for (size_t i = startSearchIndex; i <= endSearchIndex; ++i)
+    {
+        double dist = std::hypot(pGps->posX - traj_data[i].x, pGps->posY - traj_data[i].y);
+        if (dist < minDist)
+        {
+            minDist = dist;
+            closestIndex = i;
+        }
+    }
+    currentIndex = closestIndex; // 更新当前位置索引
+
+    // 寻找前视目标点
+    size_t targetIndex = closestIndex;
+    double curLookAheadDist = 0.0;
+    while (targetIndex < endSearchIndex && curLookAheadDist < lookAheadDistance)
+    {
+        ++targetIndex;
+        curLookAheadDist = std::hypot(pGps->posX - traj_data[targetIndex].x, pGps->posY - traj_data[targetIndex].y);
+    }
+
+    // 计算目标方向
+    double dx = traj_data[targetIndex].x - pGps->posX;
+    double dy = traj_data[targetIndex].y - pGps->posY;
+    double targetHeading = std::atan2(dy, dx);
+
+    // 角度归一化到 [-π, π]
+    auto normalizeAngle = [](double angle)
+    {
+        while (angle > M_PI)
+            angle -= 2.0 * M_PI;
+        while (angle < -M_PI)
+            angle += 2.0 * M_PI;
+        return angle;
+    };
+
+    targetHeading = normalizeAngle(targetHeading);
+    double currentHeading = normalizeAngle(pGps->oriZ);
+
+    // 计算横向误差角度
+    double alfa = normalizeAngle(targetHeading - currentHeading);
+    double ld = std::hypot(dx, dy); // 前视距离
+    double L = 2.85;                // 轴距（米）
+
+    // 纯跟踪算法计算转向角
+    double currentSteering = -std::atan2(2.0 * L * std::sin(alfa), ld) * (18.0 / M_PI); // 转换为角度制
+    currentSteering = MINMAX(currentSteering, -1.0, 1.0);                               // 限制 [-1,1]
+
+    // Step 2: 转向平滑滤波
+
+    double speedFactor = std::max(0.0, 1.0 - currentSpeed * 0.02); // 速度越高滤波越强
+    double alpha = 0.05 + 0.15 * speedFactor;                      // 动态调整平滑因子
+    double smoothedSteering = previousSteering * (1.0 - alpha) + currentSteering * alpha;
+    previousSteering = smoothedSteering;
+
+    // Step 3: 速度控制
+    double targetSpeed = traj_data[targetIndex].v; // 点目标速度
+    double speedDiff = targetSpeed - currentSpeed;
+
+    // 速度控制逻辑
+    if (std::abs(speedDiff) < SPEED_HYSTERESIS)
+    {
+        control->throttle = 0.0;
+        control->brake = 0.0;
+    }
+    else if (speedDiff > 0)
+    {
+        // 加速（系数可调）
+        control->throttle = (float)std::min(1.0, speedDiff * 0.1);
+        control->brake = 0.0;
+    }
+    else
+    {
+        // 减速（系数可调）
+        control->throttle = 0.0;
+        control->brake = (float)std::min(1.0, -speedDiff * 0.2);
+    }
+
+    // 设置最终控制输出
+    control->steering = (float)smoothedSteering;
+
+    // 调试输出
+    std::cout << "Closest:(" << traj_data[closestIndex].x << "," << traj_data[closestIndex].y
+              << ") Target:(" << traj_data[targetIndex].x << "," << traj_data[targetIndex].y
+              << ") Steering:" << smoothedSteering << " Speed:" << currentSpeed << "\n";
+}

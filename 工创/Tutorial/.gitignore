@@ -1,0 +1,15 @@
+Build/build_release
+Build/build_debug
+bin
+Build/*
+!Build/build_debug.bat
+!Build/build_release.bat
+!Build/built_in_controller.bat
+!Build/built_in_controller.sh
+!Build/CMakeLists.txt
+!Build/gen_make_debug.sh
+!Build/gen_make_release.sh
+!Build/gen_vs_proj.bat
+!Build/rebuild_debug.sh
+!Build/rebuild_release.sh
+

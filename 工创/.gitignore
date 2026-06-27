@@ -1,0 +1,11 @@
+# 忽略
+.* 
+.vscode
+logServer.txt
+
+**\CMakeCache.txt
+CMakeFiles
+\build
+
+!.gitignore
+!.gitattributes

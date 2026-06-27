@@ -1,0 +1,1 @@
+start C:\Sim-One\SimOneAPI\ADAS\bin\Release\Manual.exe

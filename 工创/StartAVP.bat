@@ -1,0 +1,1 @@
+start ..\bin\Release\AVP.exe

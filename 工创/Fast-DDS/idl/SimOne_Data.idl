@@ -1,0 +1,6 @@
+struct SimOneDDS_Data
+{
+	long long timestamp; // timestamp millisecond
+	long frame;
+	long version; // API version
+};

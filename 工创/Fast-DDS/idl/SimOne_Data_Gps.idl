@@ -1,0 +1,29 @@
+struct SimOneDDS_Data_Gps : SimOneDDS_Data
+{
+	float posX; // Position X on Opendrive (by meter)
+	float posY; // Position Y on Opendrive (by meter)
+	float posZ; // Position Z on Opendrive (by meter)
+	float oriX; // Rotation X on Opendrive (by radian)
+	float oriY; // Rotation Y on Opendrive (by radian)
+	float oriZ; // Rotation Z on Opendrive (by radian)
+	float velX; // MainVehicle Velocity X on Opendrive (by meter)
+	float velY; // MainVehicle Velocity Y on Opendrive (by meter)
+	float velZ; // MainVehicle Velocity Z on Opendrive (by meter)
+	float throttle; //MainVehicle throttle
+	float brake; //MainVehicle brake;
+	float steering; //MainVehicle Wheel Steering angle (deg)
+	long gear; // MainVehicle gear position
+	float accelX; // MainVehicle Acceleration X on Opendrive (by meter)
+	float accelY; // MainVehicle Acceleration Y on Opendrive (by meter)
+	float accelZ; // MainVehicle Acceleration Z on Opendrive (by meter)
+	float angVelX; // MainVehicle Angular Velocity X on Opendrive (by meter)
+	float angVelY; // MainVehicle Angular Velocity Y on Opendrive (by meter)
+	float angVelZ; // MainVehicle Angular Velocity Z on Opendrive (by meter)
+	float wheelSpeedFL;  // Speed of front left wheel (by meter/sec)
+	float wheelSpeedFR;  // Speed of front right wheel (by meter/sec)
+	float wheelSpeedRL;  // Speed of rear left wheel (by meter/sec)
+	float wheelSpeedRR;  // Speed of rear right wheel (by meter/sec)
+	float engineRpm;// Speed of engine (by r/min)
+	float odometer;	// odometer in meter.
+};
+

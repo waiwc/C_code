@@ -1,0 +1,54 @@
+enum ESimOneDDS_Obstacle_Type
+{
+	ESimOneDDS_Obstacle_Type_Unknown,
+	ESimOneDDS_Obstacle_Type_Pedestrian,
+	ESimOneDDS_Obstacle_Type_Pole,
+	ESimOneDDS_Obstacle_Type_Car,
+	ESimOneDDS_Obstacle_Type_Static,
+	ESimOneDDS_Obstacle_Type_Bicycle,
+	ESimOneDDS_Obstacle_Type_Fence,
+	ESimOneDDS_Obstacle_Type_RoadMark,
+	ESimOneDDS_Obstacle_Type_TrafficSign,
+	ESimOneDDS_Obstacle_Type_TrafficLight,
+	ESimOneDDS_Obstacle_Type_Rider,
+	ESimOneDDS_Obstacle_Type_Truck,
+	ESimOneDDS_Obstacle_Type_Bus,
+	ESimOneDDS_Obstacle_Type_SpecialVehicle,
+	ESimOneDDS_Obstacle_Type_Motorcycle,
+	ESimOneDDS_Obstacle_Type_Dynamic,
+	ESimOneDDS_Obstacle_Type_GuardRail,
+	ESimOneDDS_Obstacle_Type_SpeedLimitSign,
+	ESimOneDDS_Obstacle_Type_BicycleStatic,
+	ESimOneDDS_Obstacle_Type_RoadObstacle
+};
+
+struct SimOneDDS_Data_Obstacle_Entry
+{
+	long id; // Obstacle global unique ID
+	long viewId; // Obstacle view ID in Sim-One observer.
+	ESimOneDDS_Obstacle_Type type; // Obstacle Type
+	float theta; // [deprecated] Please use oriZ for obstacle heading angle instead
+	float posX; // Obstacle Position X on Opendrive (by meter), this point is the centroid of the obstacle.
+	float posY; // Obstacle Position Y on Opendrive (by meter), this point is the centroid of the obstacle.
+	float posZ; // Obstacle Position Z on Opendrive (by meter), this point is the centroid of the obstacle.
+	float oriX; // Obstacle Rotation X on Opendrive (by radian)
+	float oriY; // Obstacle Rotation Y on Opendrive (by radian)
+	float oriZ; // Obstacle Rotation Z on Opendrive (by radian)
+	float velX; // Obstacle Velocity X on Opendrive (by meter)
+	float velY; // Obstacle Velocity Y on Opendrive (by meter)
+	float velZ; // Obstacle Velocity Z on Opendrive (by meter)
+	float length; // Obstacle length
+	float width; // Obstacle width
+	float height; // Obstacle height
+	float accelX; // Obstacle Acceleration X on Opendrive (by meter)
+	float accelY; // Obstacle Acceleration Y on Opendrive (by meter)
+	float accelZ; // Obstacle Acceleration Z on Opendrive (by meter)
+};
+
+struct SimOneDDS_Data_Obstacle : SimOneDDS_Data
+{
+	long obstacleSize; // Obstacle size
+	SimOneDDS_Data_Obstacle_Entry obstacle[255]; // Obstacle, 255 max
+};
+
+
